@@ -30,6 +30,10 @@
         <Copyright>Apache2.0</Copyright>
         <PackageLicenseUrl></PackageLicenseUrl>
         <SatelliteResourceLanguages>en-US</SatelliteResourceLanguages>
+        <!-- Prevent this analyzer from being published with AOT builds -->
+        <IsPublishable>false</IsPublishable>
+        <PublishAot>false</PublishAot>
+        <IsAotCompatible>false</IsAotCompatible>
     </PropertyGroup>
 
     <ItemGroup>

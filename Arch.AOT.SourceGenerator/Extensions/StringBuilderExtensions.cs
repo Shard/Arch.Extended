@@ -27,8 +27,9 @@ public static class StringBuilderExtensions
 		sb.AppendLine(
 			$$"""
 		    using System.Runtime.CompilerServices;
+		    using Arch.Core;
 		    using Arch.Core.Utils;
-		              
+
 		    namespace Arch.AOT.SourceGenerator
 		    {
 		       internal static class GeneratedComponentRegistry
