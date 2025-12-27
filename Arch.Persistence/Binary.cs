@@ -1,502 +1,552 @@
-﻿using Arch.Core;
+using Arch.Core;
 using Arch.Core.Extensions;
 using Arch.Core.Extensions.Dangerous;
 using Arch.Core.Utils;
 using Arch.LowLevel.Jagged;
-using MessagePack;
-using MessagePack.Formatters;
+using Arch.Persistence.Aot;
+using Nerdbank.MessagePack;
 using System.Runtime.CompilerServices;
-using Utf8Json;
+using System.Collections.Generic;
 
 namespace Arch.Persistence;
 
-
 /// <summary>
-///     The <see cref="SingleEntityFormatter"/> class
-///     is a <see cref="IJsonFormatter"/> to (de)serialize a single <see cref="Entity"/>to or from json.
+/// Converter for Entity structs (just Id and Version).
 /// </summary>
-public partial class SingleEntityFormatter : IMessagePackFormatter<Entity>
+public class EntityConverter : MessagePackConverter<Entity>
 {
+    /// <summary>
+    /// The world ID to use when deserializing entities.
+    /// Must be set before deserialization.
+    /// </summary>
+    public int WorldId { get; set; }
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, Entity value, MessagePackSerializerOptions options)
+    public override Entity Read(ref MessagePackReader reader, SerializationContext context)
     {
-        // Write id
-        writer.WriteInt32(value.Id);
-
-#if !PURE_ECS
-
-        // Write world
-        writer.WriteInt32(value.WorldId);
-#endif
-
-        // Write size
-        var componentTypes = value.GetComponentTypes();
-        writer.WriteInt32(componentTypes.Count);
-
-        // Write components
-        foreach (ref var type in componentTypes.Components)
-        {
-            // Write type
-            MessagePackSerializer.Serialize(ref writer, type, options);
-
-            // Write component
-            var cmp = value.Get(type);
-            MessagePackSerializer.Serialize(ref writer, cmp, options);
-        }
-    }
-
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public Entity Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
-    {
-        // Read id
-        var entityId = reader.ReadInt32();
-
-#if !PURE_ECS
-
-        // Read world id
-        var worldId = reader.ReadInt32();
-#endif
-
-        // Read size
-        var size = reader.ReadInt32();
-        var components = new object[size];
-
-        // Read components
-        for (var index = 0; index < size; index++)
-        {
-            // Read type
-            var type = MessagePackSerializer.Deserialize<ComponentType>(ref reader, options);
-            var cmp = MessagePackSerializer.Deserialize(type, ref reader, options);
-            components[index] = cmp!;
-        }
-
-        // Create the entity
-        var entity = EntityWorld.Create();
-        EntityWorld.AddRange(entity, components.AsSpan());
-        return entity;
-    }
-}
-
-/// <summary>
-///     The <see cref="EntityFormatter"/> class
-///     is a formatter that (de)serializes <see cref="Entity"/> structs. 
-/// </summary>
-public partial class EntityFormatter : IMessagePackFormatter<Entity>
-{
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, Entity value, MessagePackSerializerOptions options)
-    {
-        writer.WriteInt32(value.Id);
-        writer.WriteInt32(value.Version);
-    }
-
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public Entity Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
-    {
-        // Read id
+        context.DepthStep();
+        var count = reader.ReadArrayHeader();
         var id = reader.ReadInt32();
         var version = reader.ReadInt32();
         return DangerousEntityExtensions.CreateEntityStruct(id, WorldId, version);
     }
+
+    public override void Write(ref MessagePackWriter writer, in Entity value, SerializationContext context)
+    {
+        context.DepthStep();
+        writer.WriteArrayHeader(2);
+        writer.Write(value.Id);
+        writer.Write(value.Version);
+    }
 }
 
 /// <summary>
-///     The <see cref="ArrayFormatter"/> class
-///     is a <see cref="IJsonFormatter{Array}"/> to (de)serialize <see cref="Array"/>s to or from json.
+/// Converter for ComponentType.
 /// </summary>
-public partial class ArrayFormatter : IMessagePackFormatter<Array>
+public class ComponentTypeConverter : MessagePackConverter<ComponentType>
 {
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, Array value, MessagePackSerializerOptions options)
+    public override ComponentType Read(ref MessagePackReader reader, SerializationContext context)
     {
-        var type = value.GetType().GetElementType();
-
-        // Write type and size
-        MessagePackSerializer.Serialize(ref writer, type, options);
-        writer.WriteUInt32((uint)value.Length);
-
-        // Write array
-        for (var index = 0; index < value.Length; index++)
-        {
-            var obj = value.GetValue(index);
-            MessagePackSerializer.Serialize(ref writer, obj, options);
-        }
+        context.DepthStep();
+        var count = reader.ReadArrayHeader();
+        var id = reader.ReadInt32();
+        var bytesize = reader.ReadInt32();
+        return new ComponentType(id, bytesize);
     }
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public Array Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+    public override void Write(ref MessagePackWriter writer, in ComponentType value, SerializationContext context)
     {
-        // Write type and size
-        var type = MessagePackSerializer.Deserialize<Type>(ref reader, options);
-        var size = reader.ReadUInt32();
-
-        // Create array
-        var array = Array.CreateInstance(type, size);
-
-        // Read array
-        for (var index = 0; index < size; index++)
-        {
-            var obj = MessagePackSerializer.Deserialize(type, ref reader, options);
-            array.SetValue(obj, index);
-        }
-        return array;
+        context.DepthStep();
+        writer.WriteArrayHeader(2);
+        writer.Write(value.Id);
+        writer.Write(value.ByteSize);
     }
 }
 
 /// <summary>
-///     The <see cref="JaggedArrayFormatter{T}"/> class
-///     (de)serializes a <see cref="JaggedArray{T}"/>.
+/// Converter for Signature (component type collection).
 /// </summary>
-/// <typeparam name="T">The type stored in the <see cref="JaggedArray{T}"/>.</typeparam>
-public partial class JaggedArrayFormatter<T> : IMessagePackFormatter<JaggedArray<T>>
+public class SignatureConverter : MessagePackConverter<Signature>
+{
+    public override Signature Read(ref MessagePackReader reader, SerializationContext context)
+    {
+        context.DepthStep();
+        var count = reader.ReadArrayHeader();
+        var componentTypes = new ComponentType[count];
+
+        for (var i = 0; i < count; i++)
+        {
+            var typeCount = reader.ReadArrayHeader();
+            var id = reader.ReadInt32();
+            var bytesize = reader.ReadInt32();
+            componentTypes[i] = new ComponentType(id, bytesize);
+        }
+
+        return new Signature(componentTypes);
+    }
+
+    public override void Write(ref MessagePackWriter writer, in Signature value, SerializationContext context)
+    {
+        context.DepthStep();
+        writer.WriteArrayHeader(value.Count);
+        foreach (var type in value.Components)
+        {
+            writer.WriteArrayHeader(2);
+            writer.Write(type.Id);
+            writer.Write(type.ByteSize);
+        }
+    }
+}
+
+/// <summary>
+/// Converter for EntityData (entity slot information).
+/// </summary>
+public class EntityDataConverter : MessagePackConverter<EntityData>
+{
+    public override EntityData Read(ref MessagePackReader reader, SerializationContext context)
+    {
+        context.DepthStep();
+        var count = reader.ReadArrayHeader();
+        var chunkIndex = reader.ReadInt32();
+        var entityIndex = reader.ReadInt32();
+        var version = reader.ReadInt32();
+        return new EntityData(null!, new Slot(entityIndex, chunkIndex), version);
+    }
+
+    public override void Write(ref MessagePackWriter writer, in EntityData value, SerializationContext context)
+    {
+        context.DepthStep();
+        writer.WriteArrayHeader(3);
+        writer.Write(value.Slot.ChunkIndex);
+        writer.Write(value.Slot.Index);
+        writer.Write(value.Version);
+    }
+}
+
+/// <summary>
+/// Converter for JaggedArray of EntityData.
+/// </summary>
+public class JaggedArrayEntityDataConverter : MessagePackConverter<JaggedArray<EntityData>>
 {
     private const int CpuL1CacheSize = 16_384;
-    private readonly T _filler;
+    private static readonly EntityData Filler = new(null!, new Slot(-1, -1), -1);
 
-    /// <summary>
-    /// Constructor.
-    /// </summary>
-    /// <param name="filler">Filler.</param>
-    public JaggedArrayFormatter(T filler)
+    public override JaggedArray<EntityData> Read(ref MessagePackReader reader, SerializationContext context)
     {
-        _filler = filler;
-    }
-
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, JaggedArray<T> value, MessagePackSerializerOptions options)
-    {
-        // Write length/capacity and items
-        writer.WriteInt32(value.Capacity);
-        for (var index = 0; index < value.Capacity; index++)
-        {
-            var item = value[index];
-            MessagePackSerializer.Serialize(ref writer, item, options);
-        }
-    }
-
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public JaggedArray<T> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
-    {
+        context.DepthStep();
+        var outerCount = reader.ReadArrayHeader();
         var capacity = reader.ReadInt32();
-        var jaggedArray = new JaggedArray<T>(CpuL1CacheSize / Unsafe.SizeOf<T>(), _filler,capacity);
+        var jaggedArray = new JaggedArray<EntityData>(CpuL1CacheSize / Unsafe.SizeOf<EntityData>(), Filler, capacity);
 
-        for (var index = 0; index < capacity; index++)
+        for (var i = 0; i < capacity; i++)
         {
-            var item = MessagePackSerializer.Deserialize<T>(ref reader, options);
-            jaggedArray.Add(index, item);
+            var itemCount = reader.ReadArrayHeader();
+            var chunkIndex = reader.ReadInt32();
+            var entityIndex = reader.ReadInt32();
+            var version = reader.ReadInt32();
+            var item = new EntityData(null!, new Slot(entityIndex, chunkIndex), version);
+            jaggedArray.Add(i, item);
         }
 
         return jaggedArray;
     }
-}
 
-/// <summary>
-///     The <see cref="ComponentTypeFormatter"/> class
-///     is a <see cref="IJsonFormatter{ComponentType}"/> to (de)serialize <see cref="ComponentType"/>s to or from json.
-/// </summary>
-public partial class ComponentTypeFormatter : IMessagePackFormatter<ComponentType>
-{
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, ComponentType value, MessagePackSerializerOptions options)
+    public override void Write(ref MessagePackWriter writer, in JaggedArray<EntityData> value, SerializationContext context)
     {
-        // Write id
-        writer.WriteUInt32((uint)value.Id);
-
-        // Write bytesize
-        writer.WriteUInt32((uint)value.ByteSize);
-    }
-
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public ComponentType Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
-    {
-        var id = reader.ReadUInt32();
-        var bytesize = reader.ReadUInt32();
-
-        return new ComponentType((int)id, (int)bytesize);
-    }
-}
-
-/// <summary>
-///     The <see cref="ComponentTypeFormatter"/> class
-///     is a <see cref="IJsonFormatter{ComponentType}"/> to (de)serialize <see cref="Signature"/>s to or from json.
-/// </summary>
-public partial class SignatureFormatter : IMessagePackFormatter<Signature>
-{
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, Signature value, MessagePackSerializerOptions options)
-    {
-        var componentTypeFormatter = options.Resolver.GetFormatter<ComponentType>() as ComponentTypeFormatter;
-        
-        // Write count and types
-        writer.WriteUInt32((uint)value.Count);
-        foreach(var type in value.Components)
+        context.DepthStep();
+        writer.WriteArrayHeader(1 + value.Capacity);
+        writer.Write(value.Capacity);
+        for (var i = 0; i < value.Capacity; i++)
         {
-            componentTypeFormatter!.Serialize(ref writer, type, options);
+            var item = value[i];
+            writer.WriteArrayHeader(3);
+            writer.Write(item.Slot.ChunkIndex);
+            writer.Write(item.Slot.Index);
+            writer.Write(item.Version);
         }
     }
+}
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public Signature Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+/// <summary>
+/// Converter for recycled entity ID list.
+/// </summary>
+public class RecycledIdsConverter : MessagePackConverter<List<(int, int)>>
+{
+    public override List<(int, int)> Read(ref MessagePackReader reader, SerializationContext context)
     {
-        var componentTypeFormatter = options.Resolver.GetFormatter<ComponentType>() as ComponentTypeFormatter;
-        
-        // Read count
-        var count = reader.ReadUInt32();
-        
-        // Read types
-        var componentTypes = new ComponentType[count];
-        for (var index = 0; index < count; index++)
+        context.DepthStep();
+        var count = reader.ReadArrayHeader();
+        var result = new List<(int, int)>(count);
+
+        for (var i = 0; i < count; i++)
         {
-            var componentType = componentTypeFormatter!.Deserialize(ref reader, options);
-            componentTypes[index] = componentType;
+            var itemCount = reader.ReadArrayHeader();
+            var first = reader.ReadInt32();
+            var second = reader.ReadInt32();
+            result.Add((first, second));
         }
-        return new Signature(componentTypes);
+
+        return result;
+    }
+
+    public override void Write(ref MessagePackWriter writer, in List<(int, int)> value, SerializationContext context)
+    {
+        context.DepthStep();
+        writer.WriteArrayHeader(value.Count);
+        foreach (var (first, second) in value)
+        {
+            writer.WriteArrayHeader(2);
+            writer.Write(first);
+            writer.Write(second);
+        }
     }
 }
 
 /// <summary>
-///     The <see cref="ComponentTypeFormatter"/> class
-///     is a <see cref="IJsonFormatter{ComponentType}"/> to (de)serialize <see cref="ComponentType"/>s to or from json.
+/// Serialization context for Arch ECS world serialization.
+/// Holds converters and state needed during serialization.
 /// </summary>
-public partial class EntitySlotFormatter : IMessagePackFormatter<EntityData>
+public class ArchSerializationContext
 {
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, EntityData value, MessagePackSerializerOptions options)
+    public EntityConverter EntityConverter { get; } = new();
+    public ComponentTypeConverter ComponentTypeConverter { get; } = new();
+    public SignatureConverter SignatureConverter { get; } = new();
+    public EntityDataConverter EntityDataConverter { get; } = new();
+    public JaggedArrayEntityDataConverter JaggedArrayConverter { get; } = new();
+    public RecycledIdsConverter RecycledIdsConverter { get; } = new();
+    public MessagePackSerializer Serializer { get; private set; }
+
+    // State during deserialization
+    public World? World { get; set; }
+    public Archetype? CurrentArchetype { get; set; }
+    public Signature CurrentSignature { get; set; }
+    public int[]? CurrentLookupArray { get; set; }
+
+    public ArchSerializationContext() : this(Array.Empty<MessagePackConverter>())
     {
-        // Write chunk index
-        writer.WriteUInt32((uint)value.Slot.ChunkIndex);
-
-        // Write entity index
-        writer.WriteUInt32((uint)value.Slot.Index);
-
-        // Write version (required for IsAlive checks after deserialization)
-        writer.WriteInt32(value.Version);
     }
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public EntityData Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+    public ArchSerializationContext(IEnumerable<MessagePackConverter> additionalConverters)
     {
+        // Create serializer with custom converters using the 'with' pattern
+        var serializer = new MessagePackSerializer();
 
-        // Read chunk index and entity index
-        var chunkIndex = reader.ReadUInt32();
-        var entityIndex = reader.ReadUInt32();
+        // Add all converters
+        var allConverters = new List<MessagePackConverter>
+        {
+            EntityConverter,
+            ComponentTypeConverter,
+            SignatureConverter,
+            EntityDataConverter,
+            JaggedArrayConverter,
+            RecycledIdsConverter
+        };
+        allConverters.AddRange(additionalConverters);
 
-        // Read version (required for IsAlive checks after deserialization)
-        var version = reader.ReadInt32();
-
-        return new EntityData(null!, new Slot((int)entityIndex, (int)chunkIndex), version);
+        Serializer = serializer with
+        {
+            Converters = [.. serializer.Converters, .. allConverters]
+        };
     }
 }
 
-
 /// <summary>
-///     The <see cref="WorldFormatter"/> class
-///     is a <see cref="IJsonFormatter{World}"/> to (de)serialize <see cref="World"/>s to or from json.
+/// Static helper methods for world serialization using Nerdbank.MessagePack.
 /// </summary>
-public partial class WorldFormatter : IMessagePackFormatter<World>
+public static class WorldSerializer
 {
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, World value, MessagePackSerializerOptions options)
+    /// <summary>
+    /// Serialize a world to a MessagePackWriter.
+    /// </summary>
+    public static void SerializeWorld(ref MessagePackWriter writer, World world, ArchSerializationContext archContext)
     {
+        var context = new SerializationContext();
+        context.DepthStep();
+
+        // Write as a single array structure
+        writer.WriteArrayHeader(5); // baseChunkSize, baseChunkEntityCount, entityDataSlots, recycledIds, archetypes
+
         // Write important meta data
-        writer.WriteUInt32((uint)value.BaseChunkSize);
-        writer.WriteUInt32((uint)value.BaseChunkEntityCount);
-        
-        // Write slots
-        MessagePackSerializer.Serialize(ref writer, value.GetEntityDataArray(), options);
+        writer.Write(world.BaseChunkSize);
+        writer.Write(world.BaseChunkEntityCount);
 
-        //Write recycled entity ids
-        var recycledEntityIDs = value.GetRecycledEntityIds();
-        MessagePackSerializer.Serialize(ref writer, recycledEntityIDs, options);
+        // Write entity data slots
+        archContext.JaggedArrayConverter.Write(ref writer, world.GetEntityDataArray(), context);
 
-        // Write archetypes
-        writer.WriteUInt32((uint)value.Archetypes.Count);
-        foreach (var archetype in value)
+        // Write recycled entity ids
+        var recycledEntityIds = world.GetRecycledEntityIds();
+        archContext.RecycledIdsConverter.Write(ref writer, recycledEntityIds, context);
+
+        // Write archetypes as array
+        writer.WriteArrayHeader(world.Archetypes.Count);
+        foreach (var archetype in world)
         {
-            MessagePackSerializer.Serialize(ref writer, archetype, options);
+            SerializeArchetype(ref writer, archetype, archContext, context);
         }
     }
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public World Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+    /// <summary>
+    /// Deserialize a world from a MessagePackReader.
+    /// </summary>
+    public static World DeserializeWorld(ref MessagePackReader reader, ArchSerializationContext archContext)
     {
-        // Read important metadata
-        var baseChunkSize= reader.ReadUInt32();
-        var baseChunkEntityCount = reader.ReadUInt32();
-        
-        // Create world and setup formatter
-        var world = World.Create(chunkSizeInBytes: (int)baseChunkSize, minimumAmountOfEntitiesPerChunk: (int)baseChunkEntityCount);
-        var archetypeFormatter = options.Resolver.GetFormatter<Archetype>() as ArchetypeFormatter;
-        var entityFormatter = options.Resolver.GetFormatter<Entity>() as EntityFormatter;
-        entityFormatter!.WorldId = world.Id;
-        archetypeFormatter!.World = world;
-        
-        // Read slots
-        var slots = MessagePackSerializer.Deserialize<JaggedArray<EntityData>>(ref reader, options);
+        var context = new SerializationContext();
+        context.DepthStep();
 
-        //Read recycled entity ids
-        var recycledEntityIDs = MessagePackSerializer.Deserialize<List<(int, int)>>(ref reader, options);
+        var outerCount = reader.ReadArrayHeader();
+
+        // Read important metadata
+        var baseChunkSize = reader.ReadInt32();
+        var baseChunkEntityCount = reader.ReadInt32();
+
+        // Create world
+        var world = World.Create(chunkSizeInBytes: baseChunkSize, minimumAmountOfEntitiesPerChunk: baseChunkEntityCount);
+        archContext.World = world;
+        archContext.EntityConverter.WorldId = world.Id;
+
+        // Read entity data slots
+        var slots = archContext.JaggedArrayConverter.Read(ref reader, context);
+
+        // Read recycled entity ids
+        var recycledEntityIds = archContext.RecycledIdsConverter.Read(ref reader, context);
 
         // Forward values to the world
-        world.SetRecycledEntityIds(recycledEntityIDs);
+        world.SetRecycledEntityIds(recycledEntityIds);
         world.SetEntityDataArray(slots);
         world.EnsureCapacity(slots.Capacity);
-        
-        // Read archetypes
-        var size = reader.ReadInt32();
-        List<Archetype> archetypes = new();
 
-        for (var index = 0; index < size; index++)
+        // Read archetypes
+        var archetypeCount = reader.ReadArrayHeader();
+        var archetypes = new List<Archetype>(archetypeCount);
+
+        for (var i = 0; i < archetypeCount; i++)
         {
-            var archetype = archetypeFormatter.Deserialize(ref reader, options);
+            var archetype = DeserializeArchetype(ref reader, archContext, context);
             archetypes.Add(archetype);
         }
-        
-        // Set archetypes
+
         world.SetArchetypes(archetypes);
         return world;
     }
-}
 
-
-/// <summary>
-///     The <see cref="ArchetypeFormatter"/> class
-///     is a <see cref="IJsonFormatter{Archetype}"/> to (de)serialize <see cref="Archetype"/>s to or from json.
-/// </summary>
-public partial class ArchetypeFormatter : IMessagePackFormatter<Archetype>
-{
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, Archetype value, MessagePackSerializerOptions options)
+    private static void SerializeArchetype(ref MessagePackWriter writer, Archetype archetype, ArchSerializationContext archContext, SerializationContext context)
     {
-        // Setup formatters
-        var types = value.Signature;
-        var chunks = value.Chunks;
-        var chunkFormatter = options.Resolver.GetFormatter<Chunk>() as ChunkFormatter;
-        chunkFormatter!.Signature = types;
-        
-        // Write type array
-        MessagePackSerializer.Serialize(ref writer, types, options);
+        var signature = archetype.Signature;
+        var chunks = archetype.Chunks;
+
+        context.DepthStep();
+        writer.WriteArrayHeader(4); // signature, lookupArray, chunkCount, chunks
+
+        // Write signature
+        archContext.SignatureConverter.Write(ref writer, signature, context);
 
         // Write lookup array
-        MessagePackSerializer.Serialize(ref writer, value.GetLookupArray(), options);
-
-        // Write chunk size
-        writer.WriteUInt32((uint)value.ChunkCount);
-
-        // Write chunks 
-        for (var index = 0; index < value.ChunkCount; index++)
+        writer.WriteArrayHeader(archetype.GetLookupArray().Length);
+        foreach (var val in archetype.GetLookupArray())
         {
-            ref var chunk = ref chunks[index];
-            chunkFormatter.Serialize(ref writer, chunk, options);
+            writer.Write(val);
+        }
+
+        // Write chunk count
+        writer.Write(archetype.ChunkCount);
+
+        // Write chunks as array
+        writer.WriteArrayHeader(archetype.ChunkCount);
+        for (var i = 0; i < archetype.ChunkCount; i++)
+        {
+            ref var chunk = ref chunks[i];
+            SerializeChunk(ref writer, chunk, signature, archContext, context);
         }
     }
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public Archetype Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+    private static Archetype DeserializeArchetype(ref MessagePackReader reader, ArchSerializationContext archContext, SerializationContext context)
     {
+        context.DepthStep();
+        var outerCount = reader.ReadArrayHeader();
 
-        var chunkFormatter = options.Resolver.GetFormatter<Chunk>() as ChunkFormatter;
+        // Read signature
+        var signature = archContext.SignatureConverter.Read(ref reader, context);
+        archContext.CurrentSignature = signature;
 
-        // Types
-        var types = MessagePackSerializer.Deserialize<Signature>(ref reader, options);
+        // Read lookup array
+        var lookupLength = reader.ReadArrayHeader();
+        var lookupArray = new int[lookupLength];
+        for (var i = 0; i < lookupLength; i++)
+        {
+            lookupArray[i] = reader.ReadInt32();
+        }
+        archContext.CurrentLookupArray = lookupArray;
 
-        // Archetype lookup array
-        var lookupArray = MessagePackSerializer.Deserialize<int[]>(ref reader, options);
-
-        // Archetype chunk size and list
-        var chunkSize = reader.ReadUInt32();
+        // Read chunk count
+        var chunkCount = reader.ReadInt32();
 
         // Create archetype
-        var chunks = new List<Chunk>((int)chunkSize);
-        var archetype = DangerousArchetypeExtensions.CreateArchetype(World.BaseChunkSize, World.BaseChunkEntityCount, types);
+        var world = archContext.World!;
+        var archetype = DangerousArchetypeExtensions.CreateArchetype(world.BaseChunkSize, world.BaseChunkEntityCount, signature);
         archetype.Chunks.Clear(true);
-        archetype.SetCount((int)chunkSize - 1);
+        archetype.SetCount(chunkCount - 1);
+        archContext.CurrentArchetype = archetype;
 
-        // Pass types and lookup array to the chunk formatter for saving performance and memory
-        chunkFormatter!.World = World;
-        chunkFormatter.Archetype = archetype;
-        chunkFormatter.Signature = types;
-        chunkFormatter.LookupArray = lookupArray;
+        // Read chunks
+        var chunksArrayCount = reader.ReadArrayHeader();
+        var chunksList = new List<Chunk>(chunkCount);
+        var totalEntities = 0;
 
-        // Deserialise each chunk and put it into the archetype. 
-        var entities = 0;
-        for (var index = 0; index < chunkSize; index++)
+        for (var i = 0; i < chunksArrayCount; i++)
         {
-            var chunk = chunkFormatter.Deserialize(ref reader, options);
-            chunks.Add(chunk);
-            entities += chunk.Count;
+            var chunk = DeserializeChunk(ref reader, archContext, context);
+            chunksList.Add(chunk);
+            totalEntities += chunk.Count;
         }
 
-        archetype.SetChunks(chunks);
-        archetype.SetEntities(entities);
+        archetype.SetChunks(chunksList);
+        archetype.SetEntities(totalEntities);
         return archetype;
     }
-}
 
-/// <summary>
-///     The <see cref="ChunkFormatter"/> class
-///     is a <see cref="IJsonFormatter{Chunk}"/> to (de)serialize <see cref="Chunk"/>s to or from json.
-/// </summary>
-public partial class ChunkFormatter : IMessagePackFormatter<Chunk>
-{
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Serialize"/>
-    public void Serialize(ref MessagePackWriter writer, Chunk value, MessagePackSerializerOptions options)
+    private static void SerializeChunk(ref MessagePackWriter writer, Chunk chunk, Signature signature, ArchSerializationContext archContext, SerializationContext context)
     {
-        // Write size
-        writer.WriteUInt32((uint)value.Count);
+        context.DepthStep();
+        writer.WriteArrayHeader(4); // size, capacity, entities, componentArrays
 
-        // Write capacity
-        writer.WriteUInt32((uint)value.Capacity);
+        // Write size and capacity
+        writer.Write(chunk.Count);
+        writer.Write(chunk.Capacity);
 
-        // Write entitys
-        MessagePackSerializer.Serialize(ref writer, value.Entities, options);
-
-        // Persist arrays as an array...
-        foreach(var type in Signature.Components)
+        // Write entities
+        writer.WriteArrayHeader(chunk.Entities.Length);
+        foreach (var entity in chunk.Entities)
         {
-            // Write array itself
-            var array = value.GetArray(type);
-            MessagePackSerializer.Serialize(ref writer, array, options);
+            archContext.EntityConverter.Write(ref writer, entity, context);
+        }
+
+        // Write component arrays
+        writer.WriteArrayHeader(signature.Count);
+        foreach (var type in signature.Components)
+        {
+            var array = chunk.GetArray(type);
+            SerializeComponentArray(ref writer, array, chunk.Count, type, archContext);
         }
     }
 
-    /// <inheritdoc cref="IMessagePackFormatter{T}.Deserialize"/>
-    public Chunk Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+    private static Chunk DeserializeChunk(ref MessagePackReader reader, ArchSerializationContext archContext, SerializationContext context)
     {
-        // Read chunk size
-        var size = reader.ReadUInt32();
+        var world = archContext.World!;
+        var archetype = archContext.CurrentArchetype!;
+        var signature = archContext.CurrentSignature;
+        var lookupArray = archContext.CurrentLookupArray!;
 
-        // Read chunk size
-        var capacity = reader.ReadUInt32();
+        context.DepthStep();
+        var outerCount = reader.ReadArrayHeader();
+
+        // Read size and capacity
+        var size = reader.ReadInt32();
+        var capacity = reader.ReadInt32();
 
         // Read entities
-        var entities = MessagePackSerializer.Deserialize<Entity[]>(ref reader, options);
-
-        // Create chunk
-        var chunk = DangerousChunkExtensions.CreateChunk((int)capacity, LookupArray, Signature);
-        entities.CopyTo(chunk.Entities, 0);
-        chunk.SetSize((int)size);
-
-        // Updating World.EntityInfoStorage to their new archetype
-        for (var index = 0; index < size; index++)
+        var entityCount = reader.ReadArrayHeader();
+        var entities = new Entity[entityCount];
+        for (var i = 0; i < entityCount; i++)
         {
-            ref var entity = ref chunk.Entity(index);
-            entity = DangerousEntityExtensions.CreateEntityStruct(entity.Id, World.Id, entity.Version);
-            World.SetArchetype(entity, Archetype);
+            entities[i] = archContext.EntityConverter.Read(ref reader, context);
         }
 
-        // Persist arrays as an array...
-        foreach(var type in Signature.Components)
+        // Create chunk
+        var chunk = DangerousChunkExtensions.CreateChunk(capacity, lookupArray, signature);
+        entities.CopyTo(chunk.Entities, 0);
+        chunk.SetSize(size);
+
+        // Update entity archetype references
+        for (var i = 0; i < size; i++)
         {
-            // Read array of the type
-            var array = MessagePackSerializer.Deserialize<Array>(ref reader, options);
-            var chunkArray = chunk.GetArray(array.GetType().GetElementType()!);
-            Array.Copy(array, chunkArray, (int)size);
+            ref var entity = ref chunk.Entity(i);
+            entity = DangerousEntityExtensions.CreateEntityStruct(entity.Id, world.Id, entity.Version);
+            world.SetArchetype(entity, archetype);
+        }
+
+        // Read component arrays
+        var componentArrayCount = reader.ReadArrayHeader();
+        var signatureIndex = 0;
+        foreach (var type in signature.Components)
+        {
+            if (signatureIndex < componentArrayCount)
+            {
+                var array = DeserializeComponentArray(ref reader, size, type, archContext);
+                var chunkArray = chunk.GetArray(type.Type);
+                Array.Copy(array, chunkArray, size);
+                signatureIndex++;
+            }
         }
 
         return chunk;
     }
+
+    private static void SerializeComponentArray(ref MessagePackWriter writer, Array array, int count, ComponentType type, ArchSerializationContext archContext)
+    {
+        var elementType = array.GetType().GetElementType()!;
+
+        // Write type ID for deserialization
+        var typeId = ComponentTypeRegistry.GetTypeId(elementType);
+
+        writer.WriteArrayHeader(2); // typeId, data
+
+        writer.Write(typeId);
+
+        if (typeId >= 0)
+        {
+            // Use registered serializer
+            var serializer = ComponentTypeRegistry.GetSerializer(elementType);
+            serializer!.Serialize(ref writer, array, count, archContext.Serializer);
+        }
+        else
+        {
+            // Fallback: write type name and serialize as unknown
+            writer.WriteArrayHeader(2);
+            writer.Write(elementType.AssemblyQualifiedName ?? elementType.FullName ?? elementType.Name);
+            writer.WriteArrayHeader(count);
+            // Skip serialization for unregistered types - they will be default values on load
+            for (var i = 0; i < count; i++)
+            {
+                writer.WriteNil();
+            }
+        }
+    }
+
+    private static Array DeserializeComponentArray(ref MessagePackReader reader, int count, ComponentType type, ArchSerializationContext archContext)
+    {
+        var context = new SerializationContext();
+        var outerCount = reader.ReadArrayHeader();
+
+        var typeId = reader.ReadInt32();
+
+        if (typeId >= 0)
+        {
+            var elementType = ComponentTypeRegistry.GetTypeFromId(typeId);
+            if (elementType != null)
+            {
+                var serializer = ComponentTypeRegistry.GetSerializer(elementType);
+                if (serializer != null)
+                {
+                    return serializer.Deserialize(ref reader, count, archContext.Serializer);
+                }
+            }
+        }
+
+        // Fallback: read type name and skip data
+        var fallbackCount = reader.ReadArrayHeader();
+        if (fallbackCount >= 1 && reader.NextMessagePackType == MessagePackType.String)
+        {
+            _ = reader.ReadString();
+        }
+        if (fallbackCount >= 2)
+        {
+            var arrayLength = reader.ReadArrayHeader();
+            for (var i = 0; i < arrayLength; i++)
+            {
+                reader.Skip(context);
+            }
+        }
+
+        // Return empty array of the type
+        return Array.CreateInstance(type.Type, count);
+    }
 }
-
-

@@ -4,7 +4,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <TargetFramework>net8.0</TargetFramework>
-        <LangVersion>11</LangVersion>
+        <LangVersion>12</LangVersion>
 
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <DocumentationFile>bin\$(Configuration)\$(TargetFramework)\$(AssemblyName).xml</DocumentationFile>
@@ -24,15 +24,11 @@
 
         <UnityPublish>true</UnityPublish>
 
-        <!-- Package 'MessagePack' 2.6.100-alpha has a known moderate severity vulnerability, https://github.com/advisories/GHSA-4qm4-8hg2-g2xm -->
-        <!-- For proper fix, consider upgrading to MessagePack v3 https://github.com/MessagePack-CSharp/MessagePack-CSharp/blob/master/doc/migrating_v2-v3.md -->
-        <NoWarn>NU1902</NoWarn>
     </PropertyGroup>
 
     <ItemGroup>
       <PackageReference Include="Arch" Version="2.1.0" />
-      <PackageReference Include="MessagePack" Version="2.6.100-alpha" />
-      <PackageReference Include="Utf8Json" Version="1.3.7" />
+      <PackageReference Include="Nerdbank.MessagePack" Version="0.12.4-rc" />
     </ItemGroup>
 
 </Project>
