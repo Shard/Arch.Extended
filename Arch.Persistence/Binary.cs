@@ -219,6 +219,7 @@ public class ArchSerializationContext
     public World? World { get; set; }
     public Archetype? CurrentArchetype { get; set; }
     public Signature CurrentSignature { get; set; }
+    public Signature SavedSignature { get; set; } // Full signature from save (may include unknown types)
     public int[]? CurrentLookupArray { get; set; }
 
     public ArchSerializationContext() : this(Array.Empty<MessagePackConverter>())
@@ -363,8 +364,31 @@ public static class WorldSerializer
         context.DepthStep();
         var outerCount = reader.ReadArrayHeader();
 
-        // Read signature
-        var signature = archContext.SignatureConverter.Read(ref reader, context);
+        // Read signature — may contain component types unknown to the current build
+        var savedSignature = archContext.SignatureConverter.Read(ref reader, context);
+        archContext.SavedSignature = savedSignature;
+
+        // Filter to only types the runtime knows about (Type != null).
+        // Unknown types are skipped — entities will just lack those components.
+        var hasUnknown = false;
+        foreach (var t in savedSignature.Components)
+        {
+            if (t.Type == null) { hasUnknown = true; break; }
+        }
+        Signature signature;
+        if (!hasUnknown)
+        {
+            signature = savedSignature;
+        }
+        else
+        {
+            var knownTypes = new List<ComponentType>();
+            foreach (var t in savedSignature.Components)
+            {
+                if (t.Type != null) knownTypes.Add(t);
+            }
+            signature = new Signature(knownTypes.ToArray());
+        }
         archContext.CurrentSignature = signature;
 
         // Read lookup array
@@ -379,7 +403,7 @@ public static class WorldSerializer
         // Read chunk count
         var chunkCount = reader.ReadInt32();
 
-        // Create archetype
+        // Create archetype with filtered signature (only known types)
         var world = archContext.World!;
         var archetype = DangerousArchetypeExtensions.CreateArchetype(world.BaseChunkSize, world.BaseChunkEntityCount, signature);
         archetype.Chunks.Clear(true);
@@ -463,17 +487,19 @@ public static class WorldSerializer
             world.SetArchetype(entity, archetype);
         }
 
-        // Read component arrays
+        // Read component arrays — iterate over SAVED signature to consume all data,
+        // but only copy arrays for types the current build recognizes.
         var componentArrayCount = reader.ReadArrayHeader();
-        var signatureIndex = 0;
-        foreach (var type in signature.Components)
+        var savedTypes = archContext.SavedSignature.Components;
+        for (var ci = 0; ci < componentArrayCount && ci < savedTypes.Length; ci++)
         {
-            if (signatureIndex < componentArrayCount)
+            var type = savedTypes[ci];
+            var array = DeserializeComponentArray(ref reader, size, type, archContext);
+            // Only copy to chunk if this type is known (exists in filtered signature)
+            if (type.Type != null)
             {
-                var array = DeserializeComponentArray(ref reader, size, type, archContext);
-                var chunkArray = chunk.GetArray(type.Type);
+                var chunkArray = chunk.GetArray(type);
                 Array.Copy(array, chunkArray, size);
-                signatureIndex++;
             }
         }
 
@@ -546,7 +572,9 @@ public static class WorldSerializer
             }
         }
 
-        // Return empty array of the type
-        return Array.CreateInstance(type.Type, count);
+        // Return empty array — use actual type if known, otherwise byte placeholder
+        if (type.Type != null)
+            return Array.CreateInstance(type.Type, count);
+        return new byte[type.ByteSize * count];
     }
 }
