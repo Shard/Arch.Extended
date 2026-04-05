@@ -64,24 +64,17 @@ public class ComponentTypeConverter : MessagePackConverter<ComponentType>
 
 /// <summary>
 /// Converter for Signature (component type collection).
+/// Writes name-based format: [count, [typeName, byteSize], ...]
+/// Reading is handled inline in DeserializeArchetype for access to ArchSerializationContext.
 /// </summary>
 public class SignatureConverter : MessagePackConverter<Signature>
 {
     public override Signature Read(ref MessagePackReader reader, SerializationContext context)
     {
-        context.DepthStep();
-        var count = reader.ReadArrayHeader();
-        var componentTypes = new ComponentType[count];
-
-        for (var i = 0; i < count; i++)
-        {
-            var typeCount = reader.ReadArrayHeader();
-            var id = reader.ReadInt32();
-            var bytesize = reader.ReadInt32();
-            componentTypes[i] = new ComponentType(id, bytesize);
-        }
-
-        return new Signature(componentTypes);
+        // Name-based reading is handled in DeserializeArchetype directly
+        // to access ArchSerializationContext for tracking unknown types.
+        // This method exists only for the MessagePackConverter contract.
+        throw new InvalidOperationException("Signature reading is handled inline in DeserializeArchetype");
     }
 
     public override void Write(ref MessagePackWriter writer, in Signature value, SerializationContext context)
@@ -91,7 +84,8 @@ public class SignatureConverter : MessagePackConverter<Signature>
         foreach (var type in value.Components)
         {
             writer.WriteArrayHeader(2);
-            writer.Write(type.Id);
+            writer.Write(type.Type?.FullName
+                ?? throw new InvalidOperationException($"ComponentType ID {type.Id} has no resolved Type during serialization"));
             writer.Write(type.ByteSize);
         }
     }
@@ -202,6 +196,24 @@ public class RecycledIdsConverter : MessagePackConverter<List<(int, int)>>
 }
 
 /// <summary>
+/// Tracks a saved signature entry: the type name from the save file, its byte size,
+/// and the resolved ComponentType if the type exists in the current build.
+/// </summary>
+public readonly struct SavedSignatureEntry
+{
+    public readonly string Name;
+    public readonly int ByteSize;
+    public readonly ComponentType? Resolved;
+
+    public SavedSignatureEntry(string name, int byteSize, ComponentType? resolved)
+    {
+        Name = name;
+        ByteSize = byteSize;
+        Resolved = resolved;
+    }
+}
+
+/// <summary>
 /// Serialization context for Arch ECS world serialization.
 /// Holds converters and state needed during serialization.
 /// </summary>
@@ -219,7 +231,14 @@ public class ArchSerializationContext
     public World? World { get; set; }
     public Archetype? CurrentArchetype { get; set; }
     public Signature CurrentSignature { get; set; }
-    public Signature SavedSignature { get; set; } // Full signature from save (may include unknown types)
+
+    /// <summary>
+    /// Full list of saved signature entries for the current archetype.
+    /// Tracks all saved component types (resolved and unknown) so chunk
+    /// deserialization can iterate in the correct order and skip unknowns.
+    /// </summary>
+    public List<SavedSignatureEntry> SavedSignatureEntries { get; set; } = new();
+
     public int[]? CurrentLookupArray { get; set; }
 
     public ArchSerializationContext() : this(Array.Empty<MessagePackConverter>())
@@ -232,11 +251,13 @@ public class ArchSerializationContext
         var serializer = new MessagePackSerializer();
 
         // Add all converters
+        // SignatureConverter is NOT registered here — it's only called directly
+        // via archContext.SignatureConverter.Write() for serialization. Deserialization
+        // is handled inline in DeserializeArchetype for name-based type resolution.
         var allConverters = new List<MessagePackConverter>
         {
             EntityConverter,
             ComponentTypeConverter,
-            SignatureConverter,
             EntityDataConverter,
             JaggedArrayConverter,
             RecycledIdsConverter
@@ -337,7 +358,7 @@ public static class WorldSerializer
         context.DepthStep();
         writer.WriteArrayHeader(4); // signature, lookupArray, chunkCount, chunks
 
-        // Write signature
+        // Write signature using name-based format
         archContext.SignatureConverter.Write(ref writer, signature, context);
 
         // Write lookup array
@@ -364,41 +385,40 @@ public static class WorldSerializer
         context.DepthStep();
         var outerCount = reader.ReadArrayHeader();
 
-        // Read signature — may contain component types unknown to the current build
-        var savedSignature = archContext.SignatureConverter.Read(ref reader, context);
-        archContext.SavedSignature = savedSignature;
+        // Read signature entries using name-based format (inline, not via SignatureConverter)
+        var sigCount = reader.ReadArrayHeader();
+        var savedEntries = new List<SavedSignatureEntry>(sigCount);
+        var knownTypes = new List<ComponentType>(sigCount);
 
-        // Filter to only types the runtime knows about (Type != null).
-        // Unknown types are skipped — entities will just lack those components.
-        var hasUnknown = false;
-        foreach (var t in savedSignature.Components)
+        for (var i = 0; i < sigCount; i++)
         {
-            if (t.Type == null) { hasUnknown = true; break; }
-        }
-        Signature signature;
-        if (!hasUnknown)
-        {
-            signature = savedSignature;
-        }
-        else
-        {
-            var knownTypes = new List<ComponentType>();
-            foreach (var t in savedSignature.Components)
+            var entryCount = reader.ReadArrayHeader();
+            var name = reader.ReadString()!;
+            var byteSize = reader.ReadInt32();
+
+            var type = ComponentTypeRegistry.GetTypeFromName(name);
+            ComponentType? resolved = null;
+            if (type != null)
             {
-                if (t.Type != null) knownTypes.Add(t);
+                // Implicit cast auto-registers with Arch's ComponentRegistry if needed
+                resolved = (ComponentType)type;
+                knownTypes.Add(resolved.Value);
             }
-            signature = new Signature(knownTypes.ToArray());
-        }
-        archContext.CurrentSignature = signature;
 
-        // Read lookup array
+            savedEntries.Add(new SavedSignatureEntry(name, byteSize, resolved));
+        }
+
+        var signature = new Signature(knownTypes.ToArray());
+        archContext.CurrentSignature = signature;
+        archContext.SavedSignatureEntries = savedEntries;
+
+        // Read and discard the saved lookup array (encoded with old Arch IDs).
+        // We'll use the fresh lookup array from the archetype created below.
         var lookupLength = reader.ReadArrayHeader();
-        var lookupArray = new int[lookupLength];
         for (var i = 0; i < lookupLength; i++)
         {
-            lookupArray[i] = reader.ReadInt32();
+            reader.ReadInt32();
         }
-        archContext.CurrentLookupArray = lookupArray;
 
         // Read chunk count
         var chunkCount = reader.ReadInt32();
@@ -409,6 +429,9 @@ public static class WorldSerializer
         archetype.Chunks.Clear(true);
         archetype.SetCount(chunkCount - 1);
         archContext.CurrentArchetype = archetype;
+
+        // Use the fresh lookup array from the archetype (based on current runtime IDs)
+        archContext.CurrentLookupArray = archetype.GetLookupArray();
 
         // Read chunks
         var chunksArrayCount = reader.ReadArrayHeader();
@@ -487,18 +510,19 @@ public static class WorldSerializer
             world.SetArchetype(entity, archetype);
         }
 
-        // Read component arrays — iterate over SAVED signature to consume all data,
+        // Read component arrays — iterate over saved signature entries to consume all data,
         // but only copy arrays for types the current build recognizes.
         var componentArrayCount = reader.ReadArrayHeader();
-        var savedTypes = archContext.SavedSignature.Components;
-        for (var ci = 0; ci < componentArrayCount && ci < savedTypes.Length; ci++)
+        var savedEntries = archContext.SavedSignatureEntries;
+        for (var ci = 0; ci < componentArrayCount && ci < savedEntries.Count; ci++)
         {
-            var type = savedTypes[ci];
-            var array = DeserializeComponentArray(ref reader, size, type, archContext);
-            // Only copy to chunk if this type is known (exists in filtered signature)
-            if (type.Type != null)
+            var entry = savedEntries[ci];
+            var array = DeserializeComponentArray(ref reader, size, entry, archContext, context);
+
+            // Only copy to chunk if this type is known and resolved
+            if (entry.Resolved != null && array != null)
             {
-                var chunkArray = chunk.GetArray(type);
+                var chunkArray = chunk.GetArray(entry.Resolved.Value);
                 Array.Copy(array, chunkArray, size);
             }
         }
@@ -510,26 +534,22 @@ public static class WorldSerializer
     {
         var elementType = array.GetType().GetElementType()!;
 
-        // Write type ID for deserialization
-        var typeId = ComponentTypeRegistry.GetTypeId(elementType);
+        var typeName = ComponentTypeRegistry.GetTypeName(elementType) ?? elementType.FullName
+            ?? throw new InvalidOperationException($"Cannot resolve type name for {elementType}");
 
-        writer.WriteArrayHeader(2); // typeId, data
+        writer.WriteArrayHeader(2); // typeName, data
+        writer.Write(typeName);
 
-        writer.Write(typeId);
-
-        if (typeId >= 0)
+        var serializer = ComponentTypeRegistry.GetSerializer(elementType);
+        if (serializer != null)
         {
             // Use registered serializer
-            var serializer = ComponentTypeRegistry.GetSerializer(elementType);
-            serializer!.Serialize(ref writer, array, count, archContext.Serializer);
+            serializer.Serialize(ref writer, array, count, archContext.Serializer);
         }
         else
         {
-            // Fallback: write type name and serialize as unknown
-            writer.WriteArrayHeader(2);
-            writer.Write(elementType.AssemblyQualifiedName ?? elementType.FullName ?? elementType.Name);
+            // Fallback: serialize as nil array for unregistered types
             writer.WriteArrayHeader(count);
-            // Skip serialization for unregistered types - they will be default values on load
             for (var i = 0; i < count; i++)
             {
                 writer.WriteNil();
@@ -537,19 +557,19 @@ public static class WorldSerializer
         }
     }
 
-    private static Array DeserializeComponentArray(ref MessagePackReader reader, int count, ComponentType type, ArchSerializationContext archContext)
+    private static Array? DeserializeComponentArray(ref MessagePackReader reader, int count, SavedSignatureEntry entry, ArchSerializationContext archContext, SerializationContext context)
     {
-        var context = new SerializationContext();
         var outerCount = reader.ReadArrayHeader();
 
-        var typeId = reader.ReadInt32();
+        var typeName = reader.ReadString();
 
-        if (typeId >= 0)
+        // Try to find a registered serializer for this type
+        if (entry.Resolved != null)
         {
-            var elementType = ComponentTypeRegistry.GetTypeFromId(typeId);
-            if (elementType != null)
+            var resolvedType = entry.Resolved.Value.Type;
+            if (resolvedType != null)
             {
-                var serializer = ComponentTypeRegistry.GetSerializer(elementType);
+                var serializer = ComponentTypeRegistry.GetSerializer(resolvedType);
                 if (serializer != null)
                 {
                     return serializer.Deserialize(ref reader, count, archContext.Serializer);
@@ -557,13 +577,9 @@ public static class WorldSerializer
             }
         }
 
-        // Fallback: read type name and skip data
-        var fallbackCount = reader.ReadArrayHeader();
-        if (fallbackCount >= 1 && reader.NextMessagePackType == MessagePackType.String)
-        {
-            _ = reader.ReadString();
-        }
-        if (fallbackCount >= 2)
+        // Unknown or unregistered type — skip the data
+        // Could be a nil array (from fallback serialization) or structured data
+        if (reader.NextMessagePackType == MessagePackType.Array)
         {
             var arrayLength = reader.ReadArrayHeader();
             for (var i = 0; i < arrayLength; i++)
@@ -571,10 +587,12 @@ public static class WorldSerializer
                 reader.Skip(context);
             }
         }
+        else
+        {
+            // Single value or other format — skip it
+            reader.Skip(context);
+        }
 
-        // Return empty array — use actual type if known, otherwise byte placeholder
-        if (type.Type != null)
-            return Array.CreateInstance(type.Type, count);
-        return new byte[type.ByteSize * count];
+        return null;
     }
 }

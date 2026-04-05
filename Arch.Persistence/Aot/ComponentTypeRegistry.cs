@@ -14,15 +14,15 @@ public interface IComponentSerializer
 }
 
 /// <summary>
-/// Registry mapping component types to their typed serializers.
+/// Registry mapping component types to their typed serializers using stable string names.
 /// Components must be registered at startup before any serialization occurs.
+/// Uses Type.FullName as the stable identifier so saves survive component reordering.
 /// </summary>
 public static class ComponentTypeRegistry
 {
     private static readonly Dictionary<Type, IComponentSerializer> _serializers = new();
-    private static readonly Dictionary<int, Type> _idToType = new();
-    private static readonly Dictionary<Type, int> _typeToId = new();
-    private static int _nextId = 0;
+    private static readonly Dictionary<string, Type> _nameToType = new();
+    private static readonly Dictionary<Type, string> _typeToName = new();
 
     /// <summary>
     /// Register a component type for serialization.
@@ -34,10 +34,25 @@ public static class ComponentTypeRegistry
         if (_serializers.ContainsKey(type))
             return;
 
-        var id = _nextId++;
-        _idToType[id] = type;
-        _typeToId[type] = id;
+        var name = type.FullName!;
+        _nameToType[name] = type;
+        _typeToName[type] = name;
         _serializers[type] = new NerdbankComponentSerializer<T>();
+    }
+
+    /// <summary>
+    /// Register a transient component type's name for deserialization resolution.
+    /// No serializer is created — component data is skipped during load but the
+    /// component slot is preserved on entities so game code can Set/Get it.
+    /// </summary>
+    public static void RegisterTransient(Type type)
+    {
+        var name = type.FullName!;
+        if (_nameToType.ContainsKey(name))
+            return;
+
+        _nameToType[name] = type;
+        _typeToName[type] = name;
     }
 
     /// <summary>
@@ -49,19 +64,19 @@ public static class ComponentTypeRegistry
     }
 
     /// <summary>
-    /// Get the type ID for serialization.
+    /// Get the stable type name for serialization.
     /// </summary>
-    public static int GetTypeId(Type type)
+    public static string? GetTypeName(Type type)
     {
-        return _typeToId.TryGetValue(type, out var id) ? id : -1;
+        return _typeToName.TryGetValue(type, out var name) ? name : null;
     }
 
     /// <summary>
-    /// Get the type from its serialization ID.
+    /// Resolve a type from its serialized name.
     /// </summary>
-    public static Type? GetTypeFromId(int id)
+    public static Type? GetTypeFromName(string name)
     {
-        return _idToType.TryGetValue(id, out var type) ? type : null;
+        return _nameToType.TryGetValue(name, out var type) ? type : null;
     }
 
     /// <summary>
@@ -75,8 +90,7 @@ public static class ComponentTypeRegistry
     public static void Clear()
     {
         _serializers.Clear();
-        _idToType.Clear();
-        _typeToId.Clear();
-        _nextId = 0;
+        _nameToType.Clear();
+        _typeToName.Clear();
     }
 }
