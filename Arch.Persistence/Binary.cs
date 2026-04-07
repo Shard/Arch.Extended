@@ -447,6 +447,22 @@ public static class WorldSerializer
 
         archetype.SetChunks(chunksList);
         archetype.SetEntities(totalEntities);
+
+        // Fix Count to point to the last chunk with entities.
+        // SetCount(chunkCount - 1) above assumes the last chunk is active, but it may be empty
+        // if entities were removed before saving. CurrentChunk (Chunks[Count]) must have entities,
+        // otherwise Archetype.Remove crashes accessing index -1 in an empty chunk.
+        var lastActive = 0;
+        for (var i = chunksList.Count - 1; i >= 0; i--)
+        {
+            if (chunksList[i].Count > 0)
+            {
+                lastActive = i;
+                break;
+            }
+        }
+        archetype.SetCount(lastActive);
+
         return archetype;
     }
 
