@@ -8,6 +8,9 @@
 
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <DocumentationFile>bin\$(Configuration)\$(TargetFramework)\$(AssemblyName).xml</DocumentationFile>
+        <!-- Consumed as a source dependency; silence vendor doc-comment (CS1591) and
+             auto-generated nullable-context (CS8669) noise so a fresh build stays clean. -->
+        <NoWarn>$(NoWarn);CS1591;CS8669</NoWarn>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
 
@@ -28,7 +31,7 @@
 
     <ItemGroup>
       <PackageReference Include="Arch" Version="2.1.0" />
-      <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
+      <PackageReference Include="Nerdbank.MessagePack" Version="1.2.4" />
     </ItemGroup>
 
 </Project>
