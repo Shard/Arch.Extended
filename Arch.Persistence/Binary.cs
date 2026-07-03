@@ -227,6 +227,12 @@ public class ArchSerializationContext
     public RecycledIdsConverter RecycledIdsConverter { get; } = new();
     public MessagePackSerializer Serializer { get; private set; }
 
+    /// <summary>
+    /// The component type registry used for name resolution and (de)serialization of
+    /// component arrays. Can be a throwaway instance for test isolation.
+    /// </summary>
+    public ComponentTypeRegistry Registry { get; }
+
     // State during deserialization
     public World? World { get; set; }
     public Archetype? CurrentArchetype { get; set; }
@@ -246,7 +252,14 @@ public class ArchSerializationContext
     }
 
     public ArchSerializationContext(IEnumerable<MessagePackConverter> additionalConverters)
+        : this(additionalConverters, null)
     {
+    }
+
+    public ArchSerializationContext(IEnumerable<MessagePackConverter> additionalConverters, ComponentTypeRegistry? registry)
+    {
+        Registry = registry ?? ComponentTypeRegistry.Default;
+
         // Create serializer with custom converters using the 'with' pattern
         var serializer = new MessagePackSerializer();
 
@@ -396,7 +409,7 @@ public static class WorldSerializer
             var name = reader.ReadString()!;
             var byteSize = reader.ReadInt32();
 
-            var type = ComponentTypeRegistry.GetTypeFromName(name);
+            var type = archContext.Registry.GetTypeFromName(name);
             ComponentType? resolved = null;
             if (type != null)
             {
@@ -550,13 +563,13 @@ public static class WorldSerializer
     {
         var elementType = array.GetType().GetElementType()!;
 
-        var typeName = ComponentTypeRegistry.GetTypeName(elementType) ?? elementType.FullName
+        var typeName = archContext.Registry.GetTypeName(elementType) ?? elementType.FullName
             ?? throw new InvalidOperationException($"Cannot resolve type name for {elementType}");
 
         writer.WriteArrayHeader(2); // typeName, data
         writer.Write(typeName);
 
-        var serializer = ComponentTypeRegistry.GetSerializer(elementType);
+        var serializer = archContext.Registry.GetSerializer(elementType);
         if (serializer != null)
         {
             // Use registered serializer
@@ -585,7 +598,7 @@ public static class WorldSerializer
             var resolvedType = entry.Resolved.Value.Type;
             if (resolvedType != null)
             {
-                var serializer = ComponentTypeRegistry.GetSerializer(resolvedType);
+                var serializer = archContext.Registry.GetSerializer(resolvedType);
                 if (serializer != null)
                 {
                     return serializer.Deserialize(ref reader, count, archContext.Serializer);

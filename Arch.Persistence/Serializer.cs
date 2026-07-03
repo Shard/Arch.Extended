@@ -1,4 +1,5 @@
 using Arch.Core;
+using Arch.Persistence.Aot;
 using Nerdbank.MessagePack;
 using System.Buffers;
 
@@ -42,8 +43,18 @@ public class ArchBinarySerializer : IArchSerializer
     }
 
     public ArchBinarySerializer(IEnumerable<MessagePackConverter> additionalConverters)
+        : this(additionalConverters, null)
     {
-        _archContext = new ArchSerializationContext(additionalConverters);
+    }
+
+    /// <summary>
+    /// Creates a serializer, optionally using a specific <paramref name="registry"/>
+    /// (for test isolation with throwaway registries). When null, uses
+    /// <see cref="ComponentTypeRegistry.Default"/>.
+    /// </summary>
+    public ArchBinarySerializer(IEnumerable<MessagePackConverter> additionalConverters, ComponentTypeRegistry? registry)
+    {
+        _archContext = new ArchSerializationContext(additionalConverters, registry);
     }
 
     /// <inheritdoc/>
